@@ -26,6 +26,7 @@ class YouTubeDownloaderWidget(BaseWidget):
         resolution: str = Field("highest", description="视频分辨率 (highest, 720p, 480p, 360p, 240p, 144p)")
         filename: Optional[str] = Field(None, description="保存的文件名 (可选，默认使用视频标题)")
         audio_only: bool = Field(False, description="仅下载音频")
+        download_subtitles: bool = Field(False, description="下载英文字幕")
         
         @validator('url')
         def validate_url(cls, url):
@@ -45,6 +46,7 @@ class YouTubeDownloaderWidget(BaseWidget):
         file_path: Optional[str] = Field(description="下载文件的路径")
         video_title: Optional[str] = Field(description="视频标题")
         channel_name: Optional[str] = Field(description="频道名称")
+        subtitle_path: Optional[str] = Field(None, description="字幕文件路径")
     
     def _normalize_filename(self, title: str) -> str:
         """规范化文件名，替换无效字符"""
@@ -77,31 +79,49 @@ class YouTubeDownloaderWidget(BaseWidget):
             # 规范化文件名
             filename = self._normalize_filename(filename)
             
+            result = {
+                "success": True,
+                "message": f"视频成功下载: {yt.title}",
+                "file_path": None,
+                "video_title": yt.title,
+                "channel_name": yt.author,
+                "subtitle_path": None
+            }
+            
             if config.audio_only:
                 # 下载音频
                 file_path = self._download_audio(yt, output_dir, filename)
+                result["file_path"] = str(file_path)
             else:
                 # 下载视频
                 file_path = self._download_video(yt, output_dir, filename, config.resolution)
+                result["file_path"] = str(file_path)
             
-            return {
-                "success": True,
-                "message": f"视频成功下载: {yt.title}",
-                "file_path": str(file_path),
-                "video_title": yt.title,
-                "channel_name": yt.author
-            }
+            # 如果需要下载字幕
+            if config.download_subtitles:
+                subtitle_path = self._download_subtitles(yt, output_dir, filename)
+                result["subtitle_path"] = str(subtitle_path) if subtitle_path else None
+                if subtitle_path:
+                    result["message"] += "，并成功下载英文字幕"
+                else:
+                    result["message"] += "，但该视频没有可用的英文字幕"
+            
+            return result
             
         except Exception as e:
             # 记录错误并处理
-            logging.error(f"下载失败: {str(e)}")
+            
+            logging.error(f"下载失败: {repr(e)}")
             return {
                 "success": False,
-                "message": f"下载失败: {str(e)}",
+                "message": f"下载失败: {repr(e)}",
                 "file_path": None,
                 "video_title": None,
-                "channel_name": None
+                "channel_name": None,
+                "subtitle_path": None
             }
+            
+        
     
     def _download_audio(self, yt, output_dir, filename):
         """下载音频流"""
@@ -133,21 +153,42 @@ class YouTubeDownloaderWidget(BaseWidget):
         stream.download(output_path=str(output_dir), filename=f"{filename}.{file_extension}")
         return file_path
 
+    def _download_subtitles(self, yt, output_dir, filename):
+        auto_captions = {}
+        try:
+            for k, v in yt.captions.items():
+                print(k)
+                if k.startswith('a'):
+                    auto_captions[k] = v
+        except KeyError as e:            # 尝试直接访问特定字幕
+            if 'a.en' in yt.captions:
+                auto_captions['a.en'] = yt.captions['a.en']
+            elif len(yt.captions) > 0:
+                # 获取第一个可用字幕
+                first_key = list(yt.captions)[0]
+                auto_captions[first_key] = yt.captions[first_key]
+        if auto_captions:
+            # 获取第一个可用的自动字幕
+            subtitle_code = list(auto_captions.keys())[0]
+            subtitles = yt.captions[subtitle_code]
+            subtitle_path = output_dir / f"{filename}{subtitle_code}.srt"
+            subtitles.download(output_path=str(output_dir), title=f"{filename}{subtitle_code}.srt")
+            return subtitle_path
+        else:
+            return None
+
 
 if __name__ == "__main__":
-    # 简单功能测试
-    try:
-        widget = YouTubeDownloaderWidget()
-        test_config = {
-            "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-            "output_path": "test_output",
-            "resolution": "highest",
-            "filename": None,
-            "audio_only": True
-        }
-        # 注意：config应该是一个easydict对象而不是普通字典
-        from easydict import EasyDict
-        result = widget.execute({}, EasyDict(test_config))
-        print(result)
-    except Exception as e:
-        print(f"测试失败: {str(e)}") 
+
+    widget = YouTubeDownloaderWidget()
+    test_config = {
+        "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "output_path": "test_output",
+        "resolution": "highest",
+        "filename": None,
+        "audio_only": True,
+        "download_subtitles": True
+    }
+
+    result = widget({}, test_config)
+    print(result)
