@@ -6,7 +6,7 @@ from typing import Any, Optional
 from pydantic import Field, validator
 
 from proconfig.widgets.base import WIDGETS, BaseWidget
-
+from proconfig.utils.misc import upload_file_to_myshell
 
 from pytubefix import YouTube
 
@@ -19,7 +19,7 @@ class YouTubeDownloaderWidget(BaseWidget):
     """
     CATEGORY = "Custom Widgets/Media Tools"
     NAME = "YouTube Video Downloader"
-    
+
     class InputsSchema(BaseWidget.InputsSchema):
         url: str = Field("", description="YouTube视频URL")
         output_path: str = Field("output/youtube_downloads", description="下载文件保存路径")
@@ -27,19 +27,19 @@ class YouTubeDownloaderWidget(BaseWidget):
         filename: Optional[str] = Field(None, description="保存的文件名 (可选，默认使用视频标题)")
         audio_only: bool = Field(False, description="仅下载音频")
         download_subtitles: bool = Field(False, description="下载英文字幕")
-        
+
         @validator('url')
         def validate_url(cls, url):
             if not url:
                 raise ValueError("请提供YouTube视频URL")
-            
+
             # 简单验证YouTube URL格式
             youtube_regex = r'(https?://)?(www\.)?(youtube|youtu|youtube-nocookie)\.(com|be)/(watch\?v=|embed/|v/|.+\?v=)?([^&=%\?]{11})'
             match = re.match(youtube_regex, url)
             if not match:
                 raise ValueError("无效的YouTube URL")
             return url
-    
+
     class OutputsSchema(BaseWidget.OutputsSchema):
         success: bool = Field(description="下载是否成功")
         message: str = Field(description="状态消息")
@@ -47,22 +47,23 @@ class YouTubeDownloaderWidget(BaseWidget):
         video_title: Optional[str] = Field(description="视频标题")
         channel_name: Optional[str] = Field(description="频道名称")
         subtitle_path: Optional[str] = Field(None, description="字幕文件路径")
-    
+        myshell_url: Optional[str] = Field(None, description="MyShell上传后的URL")
+
     def _normalize_filename(self, title: str) -> str:
         """规范化文件名，替换无效字符"""
         invalid_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|']
         for char in invalid_chars:
             title = title.replace(char, '_')
         return title
-        
+
     def execute(self, environ, config):
         """
         执行YouTube视频下载
-        
+
         Args:
             environ: 环境变量
             config: 配置参数，包含url，output_path等
-            
+
         Returns:
             包含下载结果的字典
         """
@@ -70,33 +71,36 @@ class YouTubeDownloaderWidget(BaseWidget):
             # 创建输出目录
             output_dir = Path(config.output_path)
             output_dir.mkdir(parents=True, exist_ok=True)
-            
+
             # 创建YouTube对象
             yt = YouTube(config.url)
-            
+
             # 设置文件名
             filename = config.filename or yt.title
             # 规范化文件名
             filename = self._normalize_filename(filename)
-            
+
             result = {
                 "success": True,
                 "message": f"视频成功下载: {yt.title}",
                 "file_path": None,
                 "video_title": yt.title,
                 "channel_name": yt.author,
-                "subtitle_path": None
+                "subtitle_path": None,
+                "myshell_url": None
             }
-            
+
             if config.audio_only:
                 # 下载音频
-                file_path = self._download_audio(yt, output_dir, filename)
+                file_path, myshell_url = self._download_audio(yt, output_dir, filename)
                 result["file_path"] = str(file_path)
+                result["myshell_url"] = myshell_url
+
             else:
                 # 下载视频
                 file_path = self._download_video(yt, output_dir, filename, config.resolution)
                 result["file_path"] = str(file_path)
-            
+
             # 如果需要下载字幕
             if config.download_subtitles:
                 subtitle_path = self._download_subtitles(yt, output_dir, filename)
@@ -105,12 +109,12 @@ class YouTubeDownloaderWidget(BaseWidget):
                     result["message"] += "，并成功下载英文字幕"
                 else:
                     result["message"] += "，但该视频没有可用的英文字幕"
-            
+
             return result
-            
+
         except Exception as e:
             # 记录错误并处理
-            
+
             logging.error(f"下载失败: {repr(e)}")
             return {
                 "success": False,
@@ -118,21 +122,32 @@ class YouTubeDownloaderWidget(BaseWidget):
                 "file_path": None,
                 "video_title": None,
                 "channel_name": None,
-                "subtitle_path": None
+                "subtitle_path": None,
+                "myshell_url": None
             }
-            
-        
-    
+
+
+
     def _download_audio(self, yt, output_dir, filename):
         """下载音频流"""
         stream = yt.streams.get_audio_only()
-        file_extension = "m4a"  # 音频格式通常为m4a
+        file_extension = "mp3"  # 音频格式通常为m4a
         file_path = output_dir / f"{filename}.{file_extension}"
-        
+        print(f"DEBUG 下载音频文件: {file_path}")
+
         # 执行下载
         stream.download(output_path=str(output_dir), filename=f"{filename}.{file_extension}")
-        return file_path
-    
+
+        # 上传到myshell
+        try:
+            myshell_url = upload_file_to_myshell(str(file_path))
+            logging.info(f"Audio file uploaded to myshell: {myshell_url}")
+        except Exception as e:
+            logging.error(f"Failed to upload audio to myshell: {repr(e)}")
+            myshell_url = None
+
+        return file_path, myshell_url
+
     def _download_video(self, yt, output_dir, filename, resolution):
         """下载视频流"""
         if resolution == "highest":
@@ -140,15 +155,15 @@ class YouTubeDownloaderWidget(BaseWidget):
         else:
             # 尝试获取指定分辨率
             stream = yt.streams.filter(progressive=True, res=resolution).first()
-            
+
             # 如果未找到指定分辨率，回退到最高分辨率
             if not stream:
                 stream = yt.streams.get_highest_resolution()
-        
+
         # 获取文件扩展名
         file_extension = stream.mime_type.split('/')[-1]
         file_path = output_dir / f"{filename}.{file_extension}"
-        
+
         # 执行下载
         stream.download(output_path=str(output_dir), filename=f"{filename}.{file_extension}")
         return file_path
