@@ -1,3 +1,4 @@
 pytubefix>=0.0.9
 pydantic>=2.0.0
 easydict>=1.9 
+pydub

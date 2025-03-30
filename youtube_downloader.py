@@ -1,6 +1,9 @@
 import os
 import re
 import logging
+import wave
+import audioop
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Optional
 from pydantic import Field, validator
@@ -10,7 +13,31 @@ from proconfig.utils.misc import upload_file_to_myshell
 
 from pytubefix import YouTube
 
+# 导入pydub处理音频
+try:
+    from pydub import AudioSegment
+    import warnings
+    # 忽略pydub的ffmpeg警告
+    warnings.filterwarnings("ignore", category=RuntimeWarning, 
+                           message="Couldn't find ffmpeg or avconv")
+    warnings.filterwarnings("ignore", category=RuntimeWarning, 
+                          message="Couldn't find ffprobe or avprobe")
+    PYDUB_AVAILABLE = True
+except ImportError:
+    PYDUB_AVAILABLE = False
+    logging.warning("pydub未安装，将无法进行音频压缩。请通过pip install pydub安装")
 
+
+# 音频压缩大小阈值(字节)
+AUDIO_COMPRESSION_THRESHOLD = 50 * 1024 * 1024  # 50MB
+
+# 检查ffmpeg是否可用
+FFMPEG_AVAILABLE = False
+try:
+    from pydub.utils import which
+    FFMPEG_AVAILABLE = which("ffmpeg") is not None or which("avconv") is not None
+except:
+    pass
 
 @WIDGETS.register_module()
 class YouTubeDownloaderWidget(BaseWidget):
@@ -92,9 +119,10 @@ class YouTubeDownloaderWidget(BaseWidget):
 
             if config.audio_only:
                 # 下载音频
-                file_path, myshell_url = self._download_audio(yt, output_dir, filename)
+                file_path, myshell_url, compression_message = self._download_audio(yt, output_dir, filename, config)
                 result["file_path"] = str(file_path)
                 result["myshell_url"] = myshell_url
+                result["message"] = f"音频成功下载: {yt.title} {compression_message}"
 
             else:
                 # 下载视频
@@ -126,9 +154,7 @@ class YouTubeDownloaderWidget(BaseWidget):
                 "myshell_url": None
             }
 
-
-
-    def _download_audio(self, yt, output_dir, filename):
+    def _download_audio(self, yt, output_dir, filename, config):
         """下载音频流"""
         stream = yt.streams.get_audio_only()
         file_extension = "mp3"  # 音频格式通常为m4a
@@ -137,6 +163,26 @@ class YouTubeDownloaderWidget(BaseWidget):
 
         # 执行下载
         stream.download(output_path=str(output_dir), filename=f"{filename}.{file_extension}")
+        
+        # 检查文件大小，如果超过阈值则压缩
+        compression_message = ""
+        if os.path.getsize(file_path) > AUDIO_COMPRESSION_THRESHOLD:
+            # 尝试使用pydub压缩
+            compressed = False
+            if PYDUB_AVAILABLE and FFMPEG_AVAILABLE:
+                compressed = self._compress_audio_with_pydub(file_path)
+            
+            # 如果pydub失败或不可用，尝试使用简单方法（如有）
+            if not compressed:
+                try:
+                    # 这里我们只打印一条消息，因为目前没有可靠的纯Python音频压缩方法
+                    logging.warning("音频文件大于50MB，但无法压缩。推荐安装ffmpeg以启用压缩功能。")
+                    compression_message = "（文件大于50MB，但无法压缩，请安装ffmpeg启用压缩功能）"
+                except Exception as e:
+                    logging.error(f"备选压缩失败: {repr(e)}")
+            else:
+                compression_message = "（文件大于50MB，已自动压缩）"
+                logging.info(f"音频文件已压缩: {file_path}")
 
         # 上传到myshell
         try:
@@ -146,7 +192,96 @@ class YouTubeDownloaderWidget(BaseWidget):
             logging.error(f"Failed to upload audio to myshell: {repr(e)}")
             myshell_url = None
 
-        return file_path, myshell_url
+        return file_path, myshell_url, compression_message
+
+    def _compress_audio_with_pydub(self, file_path):
+        """使用pydub压缩音频文件，确保小于50MB
+        
+        Args:
+            file_path: 音频文件路径
+            
+        Returns:
+            bool: 压缩是否成功
+        """
+        if not PYDUB_AVAILABLE:
+            logging.error("无法压缩音频：pydub未安装。请通过pip install pydub安装")
+            return False
+            
+        if not FFMPEG_AVAILABLE:
+            logging.error("无法压缩音频：ffmpeg未安装。请安装ffmpeg并确保它在系统PATH中")
+            logging.error("Windows安装方法: 下载ffmpeg (https://ffmpeg.org/download.html) 或使用 choco install ffmpeg")
+            return False
+            
+        try:
+            # 获取原始文件大小
+            original_size = os.path.getsize(file_path)
+            target_size = AUDIO_COMPRESSION_THRESHOLD
+            
+            # 加载音频文件
+            try:
+                audio = AudioSegment.from_file(str(file_path))
+            except Exception as e:
+                logging.error(f"加载音频文件失败: {repr(e)}")
+                return False
+            
+            # 压缩策略：从较高质量开始，逐步降低
+            qualities = [5, 7, 9]  # mp3压缩质量，范围1-9，越大压缩率越高但质量越低
+            
+            for quality in qualities:
+                temp_path = str(file_path) + f".temp_q{quality}.mp3"
+                
+                try:
+                    # 导出时设置压缩质量
+                    audio.export(
+                        temp_path, 
+                        format="mp3", 
+                        parameters=["-q:a", str(quality)]
+                    )
+                    
+                    # 检查压缩后的大小
+                    compressed_size = os.path.getsize(temp_path)
+                    
+                    if compressed_size < target_size:
+                        # 压缩成功
+                        os.replace(temp_path, file_path)
+                        logging.info(f"音频文件已压缩: {original_size/1024/1024:.2f}MB -> {compressed_size/1024/1024:.2f}MB")
+                        return True
+                    else:
+                        # 压缩后仍然太大，尝试更高压缩率
+                        os.remove(temp_path)
+                
+                except Exception as e:
+                    logging.error(f"压缩尝试(质量{quality})失败: {repr(e)}")
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+            
+            # 如果所有尝试都失败，尝试更激进的方法：降低比特率
+            try:
+                temp_path = str(file_path) + ".temp_final.mp3"
+                audio.export(
+                    temp_path, 
+                    format="mp3", 
+                    bitrate="64k"  # 直接设置低比特率
+                )
+                
+                compressed_size = os.path.getsize(temp_path)
+                if compressed_size < target_size:
+                    os.replace(temp_path, file_path)
+                    logging.info(f"音频文件已压缩(低比特率): {original_size/1024/1024:.2f}MB -> {compressed_size/1024/1024:.2f}MB")
+                    return True
+                else:
+                    os.remove(temp_path)
+            except Exception as e:
+                logging.error(f"最终压缩尝试失败: {repr(e)}")
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            
+            logging.error("无法将音频压缩到小于50MB")
+            return False
+                
+        except Exception as e:
+            logging.error(f"音频压缩出错: {repr(e)}")
+            return False
 
     def _download_video(self, yt, output_dir, filename, resolution):
         """下载视频流"""
@@ -197,7 +332,7 @@ if __name__ == "__main__":
 
     widget = YouTubeDownloaderWidget()
     test_config = {
-        "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "url": "https://www.youtube.com/watch?v=oFtjKbXKqbg&t=2883s",
         "output_path": "test_output",
         "resolution": "highest",
         "filename": None,
