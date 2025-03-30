@@ -46,6 +46,8 @@ class YouTubeDownloaderWidget(BaseWidget):
         file_path: Optional[str] = Field(description="下载文件的路径")
         video_title: Optional[str] = Field(description="视频标题")
         channel_name: Optional[str] = Field(description="频道名称")
+        video_description: Optional[str] = Field(None, description="视频简介")
+        channel_description: Optional[str] = Field(None, description="频道简介")
         subtitle_path: Optional[str] = Field(None, description="字幕文件路径")
         myshell_url: Optional[str] = Field(None, description="MyShell上传后的URL")
 
@@ -80,12 +82,19 @@ class YouTubeDownloaderWidget(BaseWidget):
             # 规范化文件名
             filename = self._normalize_filename(filename)
 
+            # 获取视频描述和频道信息
+            video_description = yt.description
+            # 获取频道描述信息（注意：pytubefix可能无法直接获取频道描述，此处为空）
+            channel_description = ""
+
             result = {
                 "success": True,
                 "message": f"视频成功下载: {yt.title}",
                 "file_path": None,
                 "video_title": yt.title,
                 "channel_name": yt.author,
+                "video_description": video_description,
+                "channel_description": channel_description,
                 "subtitle_path": None,
                 "myshell_url": None
             }
@@ -122,6 +131,8 @@ class YouTubeDownloaderWidget(BaseWidget):
                 "file_path": None,
                 "video_title": None,
                 "channel_name": None,
+                "video_description": None,
+                "channel_description": None,
                 "subtitle_path": None,
                 "myshell_url": None
             }
@@ -197,7 +208,7 @@ if __name__ == "__main__":
 
     widget = YouTubeDownloaderWidget()
     test_config = {
-        "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "url": "https://www.youtube.com/watch?v=hz6oys4Eem4",
         "output_path": "test_output",
         "resolution": "highest",
         "filename": None,
