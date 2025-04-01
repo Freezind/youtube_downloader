@@ -24,7 +24,6 @@ class YouTubeDownloaderWidget(BaseWidget):
         url: str = Field("", description="YouTube视频URL")
         output_path: str = Field("output/youtube_downloads", description="下载文件保存路径")
         resolution: str = Field("highest", description="视频分辨率 (highest, 720p, 480p, 360p, 240p, 144p)")
-        filename: Optional[str] = Field(None, description="保存的文件名 (可选，默认使用视频标题)")
         audio_only: bool = Field(False, description="仅下载音频")
         download_subtitles: bool = Field(False, description="下载英文字幕")
 
@@ -43,12 +42,12 @@ class YouTubeDownloaderWidget(BaseWidget):
     class OutputsSchema(BaseWidget.OutputsSchema):
         success: bool = Field(description="下载是否成功")
         message: str = Field(description="状态消息")
-        file_path: Optional[str] = Field(description="下载文件的路径")
-        video_title: Optional[str] = Field(description="视频标题")
-        channel_name: Optional[str] = Field(description="频道名称")
-        video_description: Optional[str] = Field(None, description="视频简介")
-        subtitle_path: Optional[str] = Field(None, description="字幕文件路径")
-        myshell_url: Optional[str] = Field(None, description="MyShell上传后的URL")
+        file_path: str = Field("", description="下载文件的路径")
+        video_title: str = Field("", description="视频标题")
+        channel_name: str = Field("", description="频道名称")
+        video_description: str = Field("", description="视频简介")
+        subtitle_path: str = Field("", description="字幕文件路径")
+        myshell_url: str = Field("", description="MyShell上传后的URL")
 
     def _normalize_filename(self, title: str) -> str:
         """规范化文件名，替换无效字符"""
@@ -77,7 +76,7 @@ class YouTubeDownloaderWidget(BaseWidget):
             yt = YouTube(config.url)
 
             # 设置文件名
-            filename = config.filename or yt.title
+            filename = yt.title
             # 规范化文件名
             filename = self._normalize_filename(filename)
 
@@ -88,12 +87,12 @@ class YouTubeDownloaderWidget(BaseWidget):
             result = {
                 "success": True,
                 "message": f"视频成功下载: {yt.title}",
-                "file_path": None,
+                "file_path": "",
                 "video_title": yt.title,
                 "channel_name": yt.author,
                 "video_description": video_description,
-                "subtitle_path": None,
-                "myshell_url": None
+                "subtitle_path": "",
+                "myshell_url": ""
             }
 
             if config.audio_only:
@@ -110,7 +109,7 @@ class YouTubeDownloaderWidget(BaseWidget):
             # 如果需要下载字幕
             if config.download_subtitles:
                 subtitle_path = self._download_subtitles(yt, output_dir, filename)
-                result["subtitle_path"] = str(subtitle_path) if subtitle_path else None
+                result["subtitle_path"] = str(subtitle_path) if subtitle_path else ""
                 if subtitle_path:
                     result["message"] += "，并成功下载英文字幕"
                 else:
@@ -125,12 +124,12 @@ class YouTubeDownloaderWidget(BaseWidget):
             return {
                 "success": False,
                 "message": f"下载失败: {repr(e)}",
-                "file_path": None,
-                "video_title": None,
-                "channel_name": None,
-                "video_description": None,
-                "subtitle_path": None,
-                "myshell_url": None
+                "file_path": "",
+                "video_title": "",
+                "channel_name": "",
+                "video_description": "",
+                "subtitle_path": "",
+                "myshell_url": ""
             }
 
 
@@ -151,7 +150,7 @@ class YouTubeDownloaderWidget(BaseWidget):
             logging.info(f"Audio file uploaded to myshell: {myshell_url}")
         except Exception as e:
             logging.error(f"Failed to upload audio to myshell: {repr(e)}")
-            myshell_url = None
+            myshell_url = ""
 
         return file_path, myshell_url
 
@@ -207,7 +206,6 @@ if __name__ == "__main__":
         "url": "https://www.youtube.com/watch?v=hz6oys4Eem4",
         "output_path": "test_output",
         "resolution": "highest",
-        "filename": None,
         "audio_only": True,
         "download_subtitles": True
     }
