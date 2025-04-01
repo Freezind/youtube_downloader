@@ -3,7 +3,7 @@ import re
 import logging
 from pathlib import Path
 from typing import Any, Optional
-from pydantic import Field, validator
+from pydantic import Field
 
 from proconfig.widgets.base import WIDGETS, BaseWidget
 from proconfig.utils.misc import upload_file_to_myshell
@@ -26,18 +26,6 @@ class YouTubeDownloaderWidget(BaseWidget):
         resolution: str = Field("highest", description="视频分辨率 (highest, 720p, 480p, 360p, 240p, 144p)")
         audio_only: bool = Field(False, description="仅下载音频")
         download_subtitles: bool = Field(False, description="下载英文字幕")
-
-        @validator('url')
-        def validate_url(cls, url):
-            if not url:
-                raise ValueError("请提供YouTube视频URL")
-
-            # 简单验证YouTube URL格式
-            youtube_regex = r'(https?://)?(www\.)?(youtube|youtu|youtube-nocookie)\.(com|be)/(watch\?v=|embed/|v/|.+\?v=)?([^&=%\?]{11})'
-            match = re.match(youtube_regex, url)
-            if not match:
-                raise ValueError("无效的YouTube URL")
-            return url
 
     class OutputsSchema(BaseWidget.OutputsSchema):
         success: bool = Field(description="下载是否成功")
@@ -68,6 +56,16 @@ class YouTubeDownloaderWidget(BaseWidget):
             包含下载结果的字典
         """
         try:
+            # 验证URL
+            if not config.url:
+                raise ValueError("请提供YouTube视频URL")
+
+            # 简单验证YouTube URL格式
+            youtube_regex = r'(https?://)?(www\.)?(youtube|youtu|youtube-nocookie)\.(com|be)/(watch\?v=|embed/|v/|.+\?v=)?([^&=%\?]{11})'
+            match = re.match(youtube_regex, config.url)
+            if not match:
+                raise ValueError("无效的YouTube URL")
+                
             # 创建输出目录
             output_dir = Path(config.output_path)
             output_dir.mkdir(parents=True, exist_ok=True)
