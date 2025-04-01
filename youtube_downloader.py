@@ -21,7 +21,7 @@ class YouTubeDownloaderWidget(BaseWidget):
     NAME = "YouTube Video Downloader"
 
     class InputsSchema(BaseWidget.InputsSchema):
-        url: str = Field("", description="YouTube视频URL")
+        url: str = Field("https://www.youtube.com/watch?v=dQw4w9WgXcQ", description="YouTube视频URL")
         output_path: str = Field("output/youtube_downloads", description="下载文件保存路径")
         resolution: str = Field("highest", description="视频分辨率 (highest, 720p, 480p, 360p, 240p, 144p)")
         audio_only: bool = Field(False, description="仅下载音频")
