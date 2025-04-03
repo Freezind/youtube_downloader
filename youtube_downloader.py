@@ -4,18 +4,20 @@ import logging
 from pathlib import Path
 from typing import Any, Optional
 from pydantic import Field
+import requests
+from datetime import datetime
+from moviepy.editor import VideoFileClip
 
 from proconfig.widgets.base import WIDGETS, BaseWidget
 from proconfig.utils.misc import upload_file_to_myshell
 
-from pytubefix import YouTube
-
-
+from apify_client import ApifyClient
 
 @WIDGETS.register_module()
 class YouTubeDownloaderWidget(BaseWidget):
     """
-    YouTube视频下载器Widget，支持下载视频和音频。
+    YouTube视频下载器Widget，使用Apify API下载视频，并支持转换为MP3。
+    需要设置环境变量APIFY_API_KEY。
     """
     CATEGORY = "Custom Widgets/Media Tools"
     NAME = "YouTube Video Downloader"
@@ -23,19 +25,19 @@ class YouTubeDownloaderWidget(BaseWidget):
     class InputsSchema(BaseWidget.InputsSchema):
         url: str = Field("https://www.youtube.com/watch?v=dQw4w9WgXcQ", description="YouTube视频URL")
         output_path: str = Field("output/youtube_downloads", description="下载文件保存路径")
-        resolution: str = Field("highest", description="视频分辨率 (highest, 720p, 480p, 360p, 240p, 144p)")
-        audio_only: bool = Field(False, description="仅下载音频")
-        download_subtitles: bool = Field(False, description="下载英文字幕")
+        resolution: str = Field("144p", description="视频分辨率 (720p, 480p, 360p, 240p, 144p)")
+        convert_to_mp3: bool = Field(True, description="是否将视频转换为MP3")
 
     class OutputsSchema(BaseWidget.OutputsSchema):
         success: bool = Field(description="下载是否成功")
         message: str = Field(description="状态消息")
-        file_path: str = Field("", description="下载文件的路径")
+        file_path: str = Field("", description="下载视频文件的路径")
+        mp3_path: str = Field("", description="转换后的MP3文件路径")
         video_title: str = Field("", description="视频标题")
         channel_name: str = Field("", description="频道名称")
         video_description: str = Field("", description="视频简介")
-        subtitle_path: str = Field("", description="字幕文件路径")
-        myshell_url: str = Field("", description="MyShell上传后的URL")
+        myshell_url: str = Field("", description="MP3文件在MyShell上的URL")
+        mp4_url: str = Field("", description="原始MP4下载链接")
 
     def _normalize_filename(self, title: str) -> str:
         """规范化文件名，替换无效字符"""
@@ -43,6 +45,40 @@ class YouTubeDownloaderWidget(BaseWidget):
         for char in invalid_chars:
             title = title.replace(char, '_')
         return title
+        
+    def _convert_to_mp3(self, video_path, output_dir, filename):
+        """将MP4转换为MP3"""
+        mp3_path = output_dir / f"{filename}.mp3"
+        
+        try:
+            logging.info(f"开始将视频转换为MP3: {video_path}")
+            video = VideoFileClip(str(video_path))
+            video.audio.write_audiofile(str(mp3_path))
+            video.close()
+            logging.info(f"MP3转换完成: {mp3_path}")
+            return mp3_path
+        except Exception as e:
+            logging.error(f"MP3转换失败: {repr(e)}")
+            raise
+            
+    def _validate_url(self, url):
+        """验证YouTube URL格式"""
+        if not url:
+            raise ValueError("请提供YouTube视频URL")
+
+        # 简单验证YouTube URL格式
+        youtube_regex = r'(https?://)?(www\.)?(youtube|youtu|youtube-nocookie)\.(com|be)/(watch\?v=|embed/|v/|.+\?v=)?([^&=%\?]{11})'
+        match = re.match(youtube_regex, url)
+        if not match:
+            raise ValueError("无效的YouTube URL")
+        return True
+        
+    def _validate_resolution(self, resolution):
+        """验证分辨率格式"""
+        valid_resolutions = ['720p', '480p', '360p', '240p', '144p']
+        if resolution not in valid_resolutions:
+            raise ValueError(f"分辨率必须是以下之一: {', '.join(valid_resolutions)}")
+        return True
 
     def execute(self, environ, config):
         """
@@ -56,156 +92,179 @@ class YouTubeDownloaderWidget(BaseWidget):
             包含下载结果的字典
         """
         try:
-            # 验证URL
-            if not config.url:
-                raise ValueError("请提供YouTube视频URL")
-
-            # 简单验证YouTube URL格式
-            youtube_regex = r'(https?://)?(www\.)?(youtube|youtu|youtube-nocookie)\.(com|be)/(watch\?v=|embed/|v/|.+\?v=)?([^&=%\?]{11})'
-            match = re.match(youtube_regex, config.url)
-            if not match:
-                raise ValueError("无效的YouTube URL")
-                
+            # 从环境变量获取Apify API密钥
+            apify_api_key = os.environ.get("APIFY_API_KEY")
+            
+            # 如果环境变量中没有API密钥，返回错误
+            if not apify_api_key:
+                return {
+                    "success": False,
+                    "message": "缺少APIFY_API_KEY环境变量，请设置后再试",
+                    "file_path": "",
+                    "mp3_path": "",
+                    "video_title": "",
+                    "channel_name": "",
+                    "video_description": "",
+                    "myshell_url": "",
+                    "mp4_url": ""
+                }
+            
+            # 验证输入参数
+            try:
+                self._validate_url(config.url)
+                self._validate_resolution(config.resolution)
+            except ValueError as e:
+                return {
+                    "success": False,
+                    "message": str(e),
+                    "file_path": "",
+                    "mp3_path": "",
+                    "video_title": "",
+                    "channel_name": "",
+                    "video_description": "",
+                    "myshell_url": "",
+                    "mp4_url": ""
+                }
+            
             # 创建输出目录
             output_dir = Path(config.output_path)
             output_dir.mkdir(parents=True, exist_ok=True)
 
-            # 创建YouTube对象
-            yt = YouTube(config.url)
-
-            # 设置文件名
-            filename = yt.title
-            # 规范化文件名
-            filename = self._normalize_filename(filename)
-
-            # 获取视频描述和频道信息
-            video_description = yt.description
-            # 获取频道描述信息（注意：pytubefix可能无法直接获取频道描述，此处为空）
-
-            result = {
-                "success": True,
-                "message": f"视频成功下载: {yt.title}",
-                "file_path": "",
-                "video_title": yt.title,
-                "channel_name": yt.author,
-                "video_description": video_description,
-                "subtitle_path": "",
-                "myshell_url": ""
+            # 创建Apify客户端
+            client = ApifyClient(apify_api_key)
+            
+            # 准备Actor输入参数
+            run_input = {
+                "urls": [config.url],
+                "resolution": config.resolution,
+                "max_concurrent": 1,
             }
 
-            if config.audio_only:
-                # 下载音频
-                file_path, myshell_url = self._download_audio(yt, output_dir, filename)
-                result["file_path"] = str(file_path)
-                result["myshell_url"] = myshell_url
-
-            else:
-                # 下载视频
-                file_path = self._download_video(yt, output_dir, filename, config.resolution)
-                result["file_path"] = str(file_path)
-
-            # 如果需要下载字幕
-            if config.download_subtitles:
-                subtitle_path = self._download_subtitles(yt, output_dir, filename)
-                result["subtitle_path"] = str(subtitle_path) if subtitle_path else ""
-                if subtitle_path:
-                    result["message"] += "，并成功下载英文字幕"
-                else:
-                    result["message"] += "，但该视频没有可用的英文字幕"
-
+            # 运行Actor并等待完成
+            run = client.actor("QrdkHOap2H2LvbyZk").call(run_input=run_input)
+            
+            # 获取结果
+            items = list(client.dataset(run["defaultDatasetId"]).iterate_items())
+            
+            if not items:
+                return {
+                    "success": False,
+                    "message": "无法获取视频信息",
+                    "file_path": "",
+                    "mp3_path": "",
+                    "video_title": "",
+                    "channel_name": "",
+                    "video_description": "",
+                    "myshell_url": "",
+                    "mp4_url": ""
+                }
+            
+            video_info = items[0]
+            
+            # 提取视频信息
+            title = video_info.get("title", "未知标题")
+            filename = self._normalize_filename(title)
+            
+            result = {
+                "success": True,
+                "message": f"视频成功下载: {title}",
+                "file_path": "",
+                "mp3_path": "",
+                "video_title": title,
+                "channel_name": video_info.get("channel", ""),
+                "video_description": video_info.get("description", ""),
+                "myshell_url": "",
+                "mp4_url": ""
+            }
+            
+            # 下载链接
+            download_url = video_info.get("download_url", "")
+            result["mp4_url"] = download_url
+            
+            if not download_url:
+                return {
+                    "success": False,
+                    "message": "未找到下载链接",
+                    "file_path": "",
+                    "mp3_path": "",
+                    "video_title": title,
+                    "channel_name": video_info.get("channel", ""),
+                    "video_description": video_info.get("description", ""),
+                    "myshell_url": "",
+                    "mp4_url": ""
+                }
+            
+            # 下载视频
+            file_path = self._download_video(download_url, output_dir, filename)
+            result["file_path"] = str(file_path)
+            
+            # 如果需要转换为MP3
+            if config.convert_to_mp3:
+                mp3_path = self._convert_to_mp3(file_path, output_dir, filename)
+                result["mp3_path"] = str(mp3_path)
+                result["message"] += f"，并已转换为MP3"
+                
+                # 上传MP3到myshell
+                try:
+                    myshell_url = upload_file_to_myshell(str(mp3_path))
+                    result["myshell_url"] = myshell_url
+                    logging.info(f"MP3已上传到myshell: {myshell_url}")
+                except Exception as e:
+                    logging.error(f"上传MP3到myshell失败: {repr(e)}")
+                    result["myshell_url"] = ""
+            
             return result
 
         except Exception as e:
             # 记录错误并处理
-
             logging.error(f"下载失败: {repr(e)}")
             return {
                 "success": False,
                 "message": f"下载失败: {repr(e)}",
                 "file_path": "",
+                "mp3_path": "",
                 "video_title": "",
                 "channel_name": "",
                 "video_description": "",
-                "subtitle_path": "",
-                "myshell_url": ""
+                "myshell_url": "",
+                "mp4_url": ""
             }
 
-
-
-    def _download_audio(self, yt, output_dir, filename):
-        """下载音频流"""
-        stream = yt.streams.get_audio_only()
-        file_extension = "mp3"  # 音频格式通常为m4a
+    def _download_video(self, download_url, output_dir, filename):
+        """下载视频"""
+        file_extension = "mp4"
         file_path = output_dir / f"{filename}.{file_extension}"
-        print(f"DEBUG 下载音频文件: {file_path}")
-
+        
         # 执行下载
-        stream.download(output_path=str(output_dir), filename=f"{filename}.{file_extension}")
-
-        # 上传到myshell
-        try:
-            myshell_url = upload_file_to_myshell(str(file_path))
-            logging.info(f"Audio file uploaded to myshell: {myshell_url}")
-        except Exception as e:
-            logging.error(f"Failed to upload audio to myshell: {repr(e)}")
-            myshell_url = ""
-
-        return file_path, myshell_url
-
-    def _download_video(self, yt, output_dir, filename, resolution):
-        """下载视频流"""
-        if resolution == "highest":
-            stream = yt.streams.get_highest_resolution()
-        else:
-            # 尝试获取指定分辨率
-            stream = yt.streams.filter(progressive=True, res=resolution).first()
-
-            # 如果未找到指定分辨率，回退到最高分辨率
-            if not stream:
-                stream = yt.streams.get_highest_resolution()
-
-        # 获取文件扩展名
-        file_extension = stream.mime_type.split('/')[-1]
-        file_path = output_dir / f"{filename}.{file_extension}"
-
-        # 执行下载
-        stream.download(output_path=str(output_dir), filename=f"{filename}.{file_extension}")
+        response = requests.get(download_url, stream=True)
+        total_size = int(response.headers.get('content-length', 0))
+        
+        with open(file_path, 'wb') as file:
+            if total_size == 0:
+                file.write(response.content)
+            else:
+                downloaded = 0
+                for data in response.iter_content(chunk_size=4096):
+                    downloaded += len(data)
+                    file.write(data)
+                    # 可以记录下载进度，但不输出到控制台以避免日志过多
+                    if downloaded % (total_size // 10) == 0:
+                        logging.info(f"下载进度: {downloaded}/{total_size} 字节 ({downloaded/total_size:.1%})")
+        
+        logging.info(f"视频下载完成: {file_path}")
         return file_path
-
-    def _download_subtitles(self, yt, output_dir, filename):
-        auto_captions = {}
-        try:
-            for k, v in yt.captions.items():
-                print(k)
-                if k.startswith('a'):
-                    auto_captions[k] = v
-        except KeyError as e:            # 尝试直接访问特定字幕
-            if 'a.en' in yt.captions:
-                auto_captions['a.en'] = yt.captions['a.en']
-            elif len(yt.captions) > 0:
-                # 获取第一个可用字幕
-                first_key = list(yt.captions)[0]
-                auto_captions[first_key] = yt.captions[first_key]
-        if auto_captions:
-            # 获取第一个可用的自动字幕
-            subtitle_code = list(auto_captions.keys())[0]
-            subtitles = yt.captions[subtitle_code]
-            subtitle_path = output_dir / f"{filename}{subtitle_code}.srt"
-            subtitles.download(output_path=str(output_dir), title=f"{filename}{subtitle_code}.srt")
-            return subtitle_path
-        else:
-            return None
 
 
 if __name__ == "__main__":
-
+    # 必须在运行前设置环境变量
+    # os.environ["APIFY_API_KEY"] = "你的APIFY_API_KEY"
+    
     widget = YouTubeDownloaderWidget()
     test_config = {
         "url": "https://www.youtube.com/watch?v=hz6oys4Eem4",
         "output_path": "test_output",
-        "resolution": "highest",
-        "audio_only": True,
-        "download_subtitles": True
+        "resolution": "144p",
+        "convert_to_mp3": True
     }
 
     result = widget({}, test_config)

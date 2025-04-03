@@ -5,3 +5,5 @@ widget_test_output/
 simple_test_output/
 *.m4a
 *.mp4 
+*.ipynb
+*.mp3
